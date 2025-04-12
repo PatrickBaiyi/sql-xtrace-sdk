@@ -4,7 +4,7 @@ A SDK for automatically adding trace IDs to SQL SELECT statements.
 
 ## Features
 
-• Automatically adds `traceId` field to all SELECT statements executed via MyBatis
+• Automatically adds `xTraceId` field to all SELECT statements executed via MyBatis
 • Configurable support for COUNT(*) and GROUP BY queries
 • Easy integration with Spring Boot applications
 • Thread-local context management for trace IDs

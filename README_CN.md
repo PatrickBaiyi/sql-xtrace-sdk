@@ -4,7 +4,7 @@
 
 ## 功能特点
 
-- 自动向通过MyBatis执行的所有SELECT语句添加`traceId`字段
+- 自动向通过MyBatis执行的所有SELECT语句添加`xTraceId`字段
 - 可配置对COUNT(*)和GROUP BY查询的支持
 - 易于与Spring Boot应用程序集成
 - 使用线程本地上下文管理追踪ID
