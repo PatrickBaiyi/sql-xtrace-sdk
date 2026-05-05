@@ -1,108 +1,167 @@
 package com.patrick.sqltrace.core;
 
-import org.apache.ibatis.builder.StaticSqlSource;
 import org.apache.ibatis.cache.CacheKey;
 import org.apache.ibatis.executor.Executor;
 import org.apache.ibatis.mapping.*;
+import org.apache.ibatis.plugin.Invocation;
 import org.apache.ibatis.session.Configuration;
 import org.apache.ibatis.session.ResultHandler;
 import org.apache.ibatis.session.RowBounds;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-/**
- * SqlTraceInterceptor的单元测试类
- */
-public class SqlTraceInterceptorTest {
-
-    private Executor executor;
-    private MappedStatement mappedStatement;
-    private BoundSql boundSql;
-    private Configuration configuration;
-    private ResultHandler<?> resultHandler;
+class SqlTraceInterceptorTest {
 
     private SqlTraceInterceptor interceptor;
-    private Object parameter;
-    private RowBounds rowBounds;
-    private CacheKey cacheKey;
-    private List<Integer> result;
-    private org.apache.ibatis.plugin.Invocation invocation;
+    private Executor executor;
+    private Configuration configuration;
 
     @BeforeEach
-    public void setup() throws Exception {
-        // 创建真实对象
-        configuration = new Configuration();
-
-        // 使用更规范的SQL语句
-        String sql = "SELECT id, name, age FROM users WHERE status = 'active'";
-
-        // 创建BoundSql
-        boundSql = new BoundSql(configuration, sql, Collections.emptyList(), new Object());
-
-        // 创建MappedStatement
-        mappedStatement = new MappedStatement.Builder(configuration, "testStatement", new StaticSqlSource(configuration, sql), SqlCommandType.SELECT).resultMaps(Collections.singletonList(new ResultMap.Builder(configuration, "resultMap", Integer.class, Collections.emptyList()).build())).build();
-
-        // 模拟executor
+    void setup() {
+        interceptor = new SqlTraceInterceptor("xTraceId");
         executor = mock(Executor.class);
+        configuration = new Configuration();
+    }
 
-        // 创建拦截器实例
-        interceptor = new SqlTraceInterceptor(true, true, "traceId",20000);
-
-        // 设置初始上下文
-        SqlTraceContext.setTraceId("test-trace-id");
-
-        // 初始化测试数据
-        parameter = new Object();
-        rowBounds = new RowBounds();
-        cacheKey = new CacheKey();
-        result = new ArrayList<>();
-        resultHandler = mock(ResultHandler.class);
-
-        // 设置模拟对象的行为
-        when(executor.createCacheKey(any(), any(), any(), any())).thenReturn(cacheKey);
-        when(executor.query(any(MappedStatement.class), eq(parameter), eq(rowBounds), eq(resultHandler))).thenReturn(Collections.singletonList(result));
-        when(executor.query(any(MappedStatement.class), eq(parameter), eq(rowBounds), eq(resultHandler), eq(cacheKey), any(BoundSql.class))).thenReturn(Collections.singletonList(result));
+    @AfterEach
+    void cleanup() {
+        MDC.clear();
+        SqlTraceContext.clear();
     }
 
     @Test
-    public void testInterceptWithSelectStatement() throws Throwable {
-        // 创建调用对象
-        Object[] args = new Object[]{mappedStatement, parameter, rowBounds, resultHandler};
-        invocation = new org.apache.ibatis.plugin.Invocation(executor, Executor.class.getDeclaredMethod("query", MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class), args);
+    void noTraceId_proceedsWithoutModification() throws Throwable {
+        MappedStatement ms = createMappedStatement("SELECT id FROM users");
+        Object[] args = {ms, null, RowBounds.DEFAULT, mock(ResultHandler.class)};
+        Invocation invocation = new Invocation(executor, Executor.class.getMethod("query",
+                MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class), args);
 
-        assertNotNull(interceptor, "Interceptor should not be null");
-
-        // 执行拦截器方法
-        Object returnValue = interceptor.intercept(invocation);
-        // 验证结果和调用
-        assertNotNull(returnValue);
-
-        // 在这里我们不使用精确的验证，因为我们主要测试拦截器是否正常工作
-        verify(executor, times(1)).query(any(MappedStatement.class), any(), any(), any());
+        when(executor.query(any(MappedStatement.class), any(), any(RowBounds.class), any(ResultHandler.class)))
+                .thenReturn(Collections.emptyList());
+        interceptor.intercept(invocation);
+        verify(executor).query(eq(ms), any(), any(RowBounds.class), any(ResultHandler.class));
     }
 
     @Test
-    public void testInterceptWithExtendedSignature() throws Throwable {
-        // 创建调用对象，使用扩展的方法签名
-        Object[] args = new Object[]{mappedStatement, parameter, rowBounds, resultHandler, cacheKey, boundSql};
-        invocation = new org.apache.ibatis.plugin.Invocation(executor, Executor.class.getDeclaredMethod("query", MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class, CacheKey.class, BoundSql.class), args);
+    void withMdcTraceId_modifiesSql() throws Throwable {
+        MDC.put("traceId", "test-trace-001");
+        MappedStatement ms = createMappedStatement("SELECT id FROM users");
+        BoundSql boundSql = ms.getBoundSql(null);
 
-        assertNotNull(interceptor, "Interceptor should not be null");
+        Object[] args = {ms, null, RowBounds.DEFAULT, mock(ResultHandler.class),
+                new CacheKey(), boundSql};
 
-        // 执行拦截器方法
-        Object returnValue = interceptor.intercept(invocation);
-        // 验证结果和调用
-        assertNotNull(returnValue);
-        // 在这里我们不使用精确的验证，因为我们主要测试拦截器是否正常工作
-        verify(executor, times(1)).query(any(MappedStatement.class), any(), any(), any(), any(), any(BoundSql.class));
+        when(executor.query(any(MappedStatement.class), any(), any(RowBounds.class),
+                any(ResultHandler.class), any(CacheKey.class), any(BoundSql.class)))
+                .thenReturn(Collections.emptyList());
+
+        Invocation invocation = new Invocation(executor, Executor.class.getMethod("query",
+                MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class,
+                CacheKey.class, BoundSql.class), args);
+
+        interceptor.intercept(invocation);
+
+        verify(executor).query(argThat(newMs -> {
+            String sql = newMs.getBoundSql(null).getSql().toLowerCase();
+            return sql.contains("test-trace-001") && sql.contains("xtraceid");
+        }), any(), any(RowBounds.class), any(ResultHandler.class), any(CacheKey.class), any(BoundSql.class));
+    }
+
+    @Test
+    void withContextTraceId_modifiesSql() throws Throwable {
+        SqlTraceContext.setTraceId("ctx-trace-002");
+        MappedStatement ms = createMappedStatement("SELECT name FROM products");
+        BoundSql boundSql = ms.getBoundSql(null);
+
+        Object[] args = {ms, null, RowBounds.DEFAULT, mock(ResultHandler.class),
+                new CacheKey(), boundSql};
+
+        when(executor.query(any(MappedStatement.class), any(), any(RowBounds.class),
+                any(ResultHandler.class), any(CacheKey.class), any(BoundSql.class)))
+                .thenReturn(Collections.emptyList());
+
+        Invocation invocation = new Invocation(executor, Executor.class.getMethod("query",
+                MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class,
+                CacheKey.class, BoundSql.class), args);
+
+        interceptor.intercept(invocation);
+
+        verify(executor).query(argThat(newMs -> {
+            String sql = newMs.getBoundSql(null).getSql();
+            return sql.contains("ctx-trace-002");
+        }), any(), any(RowBounds.class), any(ResultHandler.class), any(CacheKey.class), any(BoundSql.class));
+    }
+
+    @Test
+    void mdcPriority_mideaApmFirst() throws Throwable {
+        MDC.put("midea-apm-traceid", "apm-trace");
+        MDC.put("tid", "tid-trace");
+        MDC.put("traceId", "generic-trace");
+        SqlTraceContext.setTraceId("ctx-trace");
+
+        MappedStatement ms = createMappedStatement("SELECT id FROM users");
+        BoundSql boundSql = ms.getBoundSql(null);
+
+        Object[] args = {ms, null, RowBounds.DEFAULT, mock(ResultHandler.class),
+                new CacheKey(), boundSql};
+
+        when(executor.query(any(MappedStatement.class), any(), any(RowBounds.class),
+                any(ResultHandler.class), any(CacheKey.class), any(BoundSql.class)))
+                .thenReturn(Collections.emptyList());
+
+        Invocation invocation = new Invocation(executor, Executor.class.getMethod("query",
+                MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class,
+                CacheKey.class, BoundSql.class), args);
+
+        interceptor.intercept(invocation);
+
+        verify(executor).query(argThat(newMs -> {
+            String sql = newMs.getBoundSql(null).getSql();
+            return sql.contains("apm-trace");
+        }), any(), any(RowBounds.class), any(ResultHandler.class), any(CacheKey.class), any(BoundSql.class));
+    }
+
+    @Test
+    void nonSelectStatement_noModification() throws Throwable {
+        MDC.put("traceId", "test-trace");
+        MappedStatement ms = createMappedStatement("UPDATE users SET name = 'x' WHERE id = 1");
+        BoundSql boundSql = ms.getBoundSql(null);
+
+        Object[] args = {ms, null, RowBounds.DEFAULT, mock(ResultHandler.class),
+                new CacheKey(), boundSql};
+
+        when(executor.query(eq(ms), any(), any(RowBounds.class),
+                any(ResultHandler.class), any(CacheKey.class), eq(boundSql)))
+                .thenReturn(Collections.emptyList());
+
+        Invocation invocation = new Invocation(executor, Executor.class.getMethod("query",
+                MappedStatement.class, Object.class, RowBounds.class, ResultHandler.class,
+                CacheKey.class, BoundSql.class), args);
+
+        interceptor.intercept(invocation);
+
+        // Should use original ms since SQL wasn't modified
+        verify(executor).query(eq(ms), any(), any(RowBounds.class),
+                any(ResultHandler.class), any(CacheKey.class), eq(boundSql));
+    }
+
+    private MappedStatement createMappedStatement(String sql) {
+        SqlSource sqlSource = parameterObject -> new BoundSql(configuration, sql,
+                new ArrayList<>(), parameterObject);
+
+        ResultMap resultMap = new ResultMap.Builder(configuration, "testResultMap",
+                Object.class, new ArrayList<>()).build();
+
+        return new MappedStatement.Builder(configuration, "testStatement", sqlSource, SqlCommandType.SELECT)
+                .resultMaps(Collections.singletonList(resultMap))
+                .build();
     }
 }

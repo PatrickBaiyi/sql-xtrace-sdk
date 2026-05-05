@@ -1,29 +1,25 @@
 package com.patrick.sqltrace.config;
 
+import com.patrick.sqltrace.core.SqlTraceInterceptor;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.mybatis.spring.SqlSessionFactoryBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import com.patrick.sqltrace.core.SqlTraceInterceptor;
-
-import org.springframework.beans.factory.config.BeanPostProcessor;
-
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Spring Boot自动配置类，负责初始化拦截器并将其添加到所有可用的SqlSessionFactory中。
- *
- * @author zhangjh39
- * @since 2025-03-12
+ * Spring Boot自动配置，将拦截器注册到所有SqlSessionFactory
  */
 @Configuration
 @EnableConfigurationProperties(SqlTraceProperties.class)
@@ -35,26 +31,16 @@ public class SqlTraceAutoConfiguration implements BeanPostProcessor {
     @Autowired
     private SqlTraceProperties properties;
 
-    // 单例拦截器实例
-    private SqlTraceInterceptor interceptorInstance;
-    
-    // 追踪已处理的SqlSessionFactory，防止重复添加拦截器
-    private final Set<SqlSessionFactory> processedFactories = new HashSet<>();
+    private volatile SqlTraceInterceptor interceptorInstance;
 
-    /**
-     * 创建SQL追踪拦截器bean
-     * @return SqlTraceInterceptor
-     */
+    private final Set<SqlSessionFactory> processedFactories =
+            Collections.newSetFromMap(new ConcurrentHashMap<>());
+
     @Bean
     public SqlTraceInterceptor sqlTraceInterceptor() {
         if (interceptorInstance == null) {
-            interceptorInstance = new SqlTraceInterceptor(
-                    properties.isEnableCountQueries(),
-                    properties.isEnableGroupByQueries(),
-                    properties.getTraceIdFieldName(),
-                    properties.getMaxPageSize()
-            );
-            logger.info("已创建SQL追踪拦截器实例: {}", interceptorInstance);
+            interceptorInstance = new SqlTraceInterceptor(properties.getTraceIdFieldName());
+            logger.info("SQL追踪拦截器已创建, fieldName={}", properties.getTraceIdFieldName());
         }
         return interceptorInstance;
     }
@@ -62,16 +48,10 @@ public class SqlTraceAutoConfiguration implements BeanPostProcessor {
     @Override
     public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
         if (bean instanceof SqlSessionFactory) {
-            SqlSessionFactory sqlSessionFactory = (SqlSessionFactory) bean;
-            
-            // 检查是否已处理过该SqlSessionFactory
-            if (!processedFactories.contains(sqlSessionFactory)) {
-                // 确保使用单例的拦截器实例
-                sqlSessionFactory.getConfiguration().addInterceptor(sqlTraceInterceptor());
-                processedFactories.add(sqlSessionFactory);
-                logger.info("已将SQL追踪拦截器添加到SqlSessionFactory: {}", sqlSessionFactory);
-            } else {
-                logger.debug("该SqlSessionFactory已添加过SQL追踪拦截器，跳过: {}", sqlSessionFactory);
+            SqlSessionFactory factory = (SqlSessionFactory) bean;
+            if (processedFactories.add(factory)) {
+                factory.getConfiguration().addInterceptor(sqlTraceInterceptor());
+                logger.info("SQL追踪拦截器已注册到SqlSessionFactory: {}", beanName);
             }
         }
         return bean;

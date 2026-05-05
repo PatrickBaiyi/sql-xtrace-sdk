@@ -1,19 +1,19 @@
-# SQL追踪SDK
+# SQL XTrace SDK
 
-一个用于自动向SQL SELECT语句添加追踪ID的SDK。
+MyBatis 拦截器，自动向所有 SELECT 语句注入 traceId 列，用于 SQL 级别的分布式链路追踪。
 
 ## 功能特点
 
-- 自动向通过MyBatis执行的所有SELECT语句添加`xTraceId`字段
-- 可配置对COUNT(*)和GROUP BY查询的支持
-- 易于与Spring Boot应用程序集成
-- 使用线程本地上下文管理追踪ID
-- 自动检查和限制大数据查询的页面大小
-- 支持从多种来源获取追踪ID（MDC、线程本地变量）
+- 自动向所有 SELECT 语句注入 `xTraceId` 字段，无例外（COUNT、GROUP BY、聚合查询均覆盖）
+- 支持复杂 SQL：JOIN、子查询、UNION、CTE、窗口函数等
+- 通过 Spring Boot AutoConfiguration 零代码接入
+- 支持从多个来源获取 traceId（MDC: `midea-apm-traceid` / `tid` / `traceId`，或手动设置）
+- 自动防重复注入
+- 非 SELECT 语句（INSERT/UPDATE/DELETE）不受影响
 
 ## 安装
 
-将依赖添加到您的Maven项目中：最新版本为1.0.3.2
+将依赖添加到 Maven 项目中：
 
 ```xml
 <dependency>
@@ -23,51 +23,43 @@
 </dependency>
 ```
 
-## 使用方法
+## 配置
 
-### 配置
-
-在`application.properties`或`application.yml`中配置SQL追踪SDK：
+在 `application.properties` 或 `application.yml` 中配置：
 
 ```properties
-# 启用/禁用SQL追踪功能（默认：true）
+# 启用/禁用 SQL 追踪（默认: true）
 sql.xtrace.enabled=true
 
-# 启用对COUNT(*)查询的追踪（默认：false）
-sql.xtrace.enable-count-queries=false
-
-# 启用对GROUP BY查询的追踪（默认：false）
-sql.xtrace.enable-group-by-queries=false
-
-# 自定义追踪ID字段名（默认：xTraceId）
+# 注入的 traceId 列别名（默认: xTraceId）
 sql.xtrace.trace-id-field-name=xTraceId
-
-# 限制最大查询页面大小（默认：20000）
-sql.xtrace.max-page-size=20000
-
 ```
 
-### 初始化追踪ID
+## 使用方式
 
-您可以在应用程序的请求处理开始时初始化追踪ID：
+### 自动模式（推荐）
+
+如果应用已接入 APM 系统（如 Midea APM、SkyWalking 等），SDK 会自动从 MDC 中获取 traceId，无需任何代码改动。
+
+MDC key 的读取优先级：`midea-apm-traceid` > `tid` > `traceId` > `SqlTraceContext`
+
+### 手动模式
 
 ```java
-// 在请求处理开始时
-String traceId = SqlTraceSDK.initTrace(); // 生成并设置一个唯一的追踪ID
+// 生成并设置 traceId
+String traceId = SqlTraceSDK.initTrace();
 
-// 或者使用特定的追踪ID
+// 或使用指定的 traceId
 SqlTraceSDK.initTrace("custom-trace-id-12345");
 
-// 获取当前的追踪ID
+// 获取当前 traceId
 String currentTraceId = SqlTraceSDK.getCurrentTraceId();
 
-// 在请求处理结束时清除追踪ID
+// 请求结束后清除
 SqlTraceSDK.clearTrace();
 ```
 
-### 与Web应用集成
-
-对于Web应用程序，您可以创建一个拦截器来自动为每个请求设置追踪ID：
+### Web 应用集成示例
 
 ```java
 @Component
@@ -75,9 +67,7 @@ public class TraceIdInterceptor implements HandlerInterceptor {
     
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
-        // 为每个请求生成一个追踪ID
         String traceId = SqlTraceSDK.initTrace();
-        // 可选：将追踪ID添加到响应头中
         response.addHeader("X-Trace-ID", traceId);
         return true;
     }
@@ -85,42 +75,51 @@ public class TraceIdInterceptor implements HandlerInterceptor {
     @Override
     public void afterCompletion(HttpServletRequest request, HttpServletResponse response, 
                                 Object handler, Exception ex) {
-        // 请求完成后清除追踪ID
         SqlTraceSDK.clearTrace();
-    }
-}
-```
-
-注册拦截器：
-
-```java
-@Configuration
-public class WebConfig implements WebMvcConfigurer {
-    
-    @Autowired
-    private TraceIdInterceptor traceIdInterceptor;
-    
-    @Override
-    public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(traceIdInterceptor);
     }
 }
 ```
 
 ## 工作原理
 
-1. SDK通过MyBatis拦截器拦截所有查询请求
-2. 对于SELECT语句，拦截器解析SQL并添加一个包含追踪ID的字段
-3. 拦截器从多种来源获取追踪ID（midea-apm-traceid、tid、traceId或线程本地变量）
-4. 修改后的SQL将被执行，让您可以在查询结果中看到追踪ID
-5. 可以根据需要配置对COUNT(*)和GROUP BY查询的处理
-6. 解决了类似order by name asc,2 desc的问题
-7. 自动限制查询页面大小，防止过大的查询导致性能问题
+1. Spring Boot 启动时自动注册 MyBatis 拦截器到所有 `SqlSessionFactory`
+2. 拦截器拦截所有 `Executor.query()` 调用
+3. 从 MDC 或 `SqlTraceContext` 中获取 traceId
+4. 使用 Druid SQL Parser 解析 SELECT 语句，在 select list 末尾追加 `'traceId值' AS xTraceId`
+5. 非 SELECT 语句、已包含 traceId 的语句直接跳过
+
+**SQL 改写示例：**
+
+```sql
+-- 原始 SQL
+SELECT id, name FROM users WHERE status = 'active'
+
+-- 改写后
+SELECT id, name, 'abc123def456' AS xTraceId FROM users WHERE status = 'active'
+```
+
+## 支持的 SQL 类型
+
+| SQL 类型 | 示例 | 是否注入 |
+|----------|------|---------|
+| 基础 SELECT | `SELECT id, name FROM users` | 是 |
+| SELECT * | `SELECT * FROM users` | 是 |
+| COUNT | `SELECT COUNT(*) FROM users` | 是 |
+| 聚合函数 | `SELECT MAX(salary), AVG(age) FROM emp` | 是 |
+| GROUP BY | `SELECT dept, COUNT(*) FROM emp GROUP BY dept` | 是 |
+| JOIN | `SELECT u.id FROM users u JOIN orders o ON ...` | 是 |
+| 子查询 | `SELECT * FROM (SELECT ...) t` | 是 |
+| UNION | `SELECT ... UNION SELECT ...` | 是（两侧都注入） |
+| CTE | `WITH cte AS (...) SELECT * FROM cte` | 是 |
+| 窗口函数 | `SELECT *, ROW_NUMBER() OVER (...) FROM ...` | 是 |
+| DISTINCT | `SELECT DISTINCT dept FROM emp` | 是 |
+| FOR UPDATE | `SELECT * FROM users FOR UPDATE` | 是 |
+| INSERT | `INSERT INTO users ...` | 否 |
+| UPDATE | `UPDATE users SET ...` | 否 |
+| DELETE | `DELETE FROM users ...` | 否 |
 
 ## 注意事项
 
-- 确保SQL追踪SDK作为您的Web应用程序的依赖项
-- 在生产环境中使用前，请在测试环境中验证SQL兼容性
-- 所有SQL都将自动添加追踪ID字段，请确保您的应用程序代码能够处理这个额外的字段
-- 目前不支持union语句
-- 对于已经包含追踪ID字段的SQL，SDK会自动跳过修改，避免重复添加
+- 确保应用能处理 SELECT 结果中额外的 traceId 列
+- 建议在测试环境验证 SQL 兼容性后再上生产
+- SDK 自动检测并跳过已包含 traceId 的 SQL，避免重复注入
